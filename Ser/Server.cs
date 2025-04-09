@@ -1,52 +1,97 @@
-﻿// Server.cs
 using System;
+using System.Collections.Concurrent;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
+using System.Threading;
 
 class Server
 {
+    private static TcpListener listener;
+    private static ConcurrentQueue<Order> orderQueue = new();
+    private static ConcurrentDictionary<Guid, Order> orderLookup = new();
+
     static void Main()
     {
-        const int port = 9000;
-        var listener = new TcpListener(IPAddress.Any, port);
-
+        listener = new TcpListener(IPAddress.Any, 5000);
         listener.Start();
-        Console.WriteLine("Сервер запущен. Ожидание подключений...");
+        Console.WriteLine("Сервер запущен...");
+
+        Thread processingThread = new(ProcessOrders);
+        processingThread.Start();
 
         while (true)
         {
-            using (TcpClient client = listener.AcceptTcpClient())
-            using (NetworkStream stream = client.GetStream())
+            TcpClient client = listener.AcceptTcpClient();
+            Thread thread = new(() => HandleClient(client));
+            thread.Start();
+        }
+    }
+
+    static void HandleClient(TcpClient client)
+    {
+        using NetworkStream stream = client.GetStream();
+        using StreamReader reader = new(stream, Encoding.UTF8);
+        using StreamWriter writer = new(stream, Encoding.UTF8) { AutoFlush = true };
+
+        while (true)
+        {
+            string? line = reader.ReadLine();
+            if (line == null) break;
+
+            if (line.StartsWith("SEND_ORDER"))
             {
-                Console.WriteLine("Клиент подключён.");
-
-                byte[] buffer = new byte[256];
-                int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                string request = Encoding.UTF8.GetString(buffer, 0, bytesRead).ToLower();
-
-                string response;
-
-                if (request == "time")
+                BinaryFormatter formatter = new();
+                Order order = (Order)formatter.Deserialize(stream);
+                orderQueue.Enqueue(order);
+                orderLookup[order.OrderId] = order;
+                writer.WriteLine($"ORDER_RECEIVED:{order.OrderId}");
+            }
+            else if (line.StartsWith("STATUS:"))
+            {
+                var id = Guid.Parse(line.Split(":")[1]);
+                if (orderLookup.TryGetValue(id, out Order? order))
                 {
-                    response = DateTime.Now.ToLongTimeString();
-                }
-                else if (request == "date")
-                {
-                    response = DateTime.Now.ToShortDateString();
+                    string status = order.IsCompleted ? "Completed" : "In Progress";
+                    writer.WriteLine($"STATUS:{status}");
                 }
                 else
                 {
-                    response = "Неверный запрос";
+                    writer.WriteLine("STATUS:Not Found");
                 }
-
-                byte[] responseData = Encoding.UTF8.GetBytes(response);
-                stream.Write(responseData, 0, responseData.Length);
-
-                Console.WriteLine($"Запрос: {request} → Ответ: {response}");
             }
+            else if (line.StartsWith("CANCEL:"))
+            {
+                var id = Guid.Parse(line.Split(":")[1]);
+                if (orderLookup.TryRemove(id, out Order? order))
+                {
+                    orderQueue = new ConcurrentQueue<Order>(orderQueue.Where(o => o.OrderId != id));
+                    writer.WriteLine("CANCELLED");
+                }
+                else
+                {
+                    writer.WriteLine("CANNOT_CANCEL");
+                }
+            }
+        }
+    }
 
-            Console.WriteLine("Соединение закрыто.\n");
+    static void ProcessOrders()
+    {
+        while (true)
+        {
+            if (orderQueue.TryDequeue(out Order? order))
+            {
+                Console.WriteLine($"Обработка заказа {order.OrderId} из ресторана {order.RestaurantName}...");
+                Thread.Sleep(order.EstimatedTime);
+                order.IsCompleted = true;
+            }
+            else
+            {
+                Thread.Sleep(1000);
+            }
         }
     }
 }
