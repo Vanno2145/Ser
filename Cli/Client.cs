@@ -1,42 +1,49 @@
-﻿// Client.cs
 using System;
+using System.IO;
 using System.Net.Sockets;
+using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
 
 class Client
 {
     static void Main()
     {
-        const string serverIP = "127.0.0.1";
-        const int port = 9000;
+        TcpClient client = new("127.0.0.1", 5000);
+        using NetworkStream stream = client.GetStream();
+        using StreamReader reader = new(stream, Encoding.UTF8);
+        using StreamWriter writer = new(stream, Encoding.UTF8) { AutoFlush = true };
 
-        Console.Write("Что хотите запросить? (time/date): ");
-        string userInput = Console.ReadLine()?.Trim().ToLower();
+        Console.WriteLine("Введите имя ресторана:");
+        string restaurantName = Console.ReadLine();
 
-        if (userInput != "time" && userInput != "date")
+        Console.WriteLine("Введите описание заказа:");
+        string description = Console.ReadLine();
+
+        Order order = new()
         {
-            Console.WriteLine(" Неверный ввод. Введите 'time' или 'date'.");
-            return;
-        }
+            RestaurantName = restaurantName,
+            Description = description
+        };
 
-        try
+        writer.WriteLine("SEND_ORDER");
+        BinaryFormatter formatter = new();
+        formatter.Serialize(stream, order);
+
+        string? response = reader.ReadLine();
+        if (response?.StartsWith("ORDER_RECEIVED:") == true)
         {
-            using (TcpClient client = new TcpClient(serverIP, port))
-            using (NetworkStream stream = client.GetStream())
+            Guid orderId = Guid.Parse(response.Split(":")[1]);
+            Console.WriteLine($"Заказ отправлен. ID: {orderId}");
+
+            while (true)
             {
-                byte[] requestData = Encoding.UTF8.GetBytes(userInput);
-                stream.Write(requestData, 0, requestData.Length);
+                Console.WriteLine("Проверить статус заказа? (y/n)");
+                if (Console.ReadLine()?.ToLower() != "y") break;
 
-                byte[] buffer = new byte[256];
-                int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                Console.WriteLine($"Ответ от сервера: {response}");
+                writer.WriteLine($"STATUS:{orderId}");
+                string? status = reader.ReadLine();
+                Console.WriteLine("Статус: " + status);
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("⚠ Ошибка подключения: " + ex.Message);
         }
     }
 }
